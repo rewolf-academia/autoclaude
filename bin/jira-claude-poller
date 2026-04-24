@@ -1,0 +1,384 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Jira → Claude Code automation poller.
+#
+# Polls Jira for tickets labeled `claude-automate`, spins up a Claude Code
+# instance per ticket in an isolated git worktree, pushes the branch, opens
+# a PR via the GitHub API, and updates the Jira ticket.
+#
+# Each ticket is handled by an independent background process, so multiple
+# tickets can be worked on simultaneously.
+#
+# Required env vars (set in ~/.jira-claude.env, loaded by the systemd service):
+#   JIRA_BASE_URL          e.g. https://academia-edu.atlassian.net
+#   JIRA_EMAIL             your Jira login email
+#   JIRA_API_TOKEN         Jira API token (id.atlassian.com → Security → API tokens)
+#   GITHUB_TOKEN           GitHub PAT with repo + pull_requests:write scopes
+
+require 'net/http'
+require 'json'
+require 'open3'
+require 'uri'
+require 'base64'
+require 'logger'
+require 'fileutils'
+
+# ── Configuration ─────────────────────────────────────────────────────────────
+
+JIRA_BASE_URL        = ENV.fetch('JIRA_BASE_URL')
+JIRA_EMAIL           = ENV.fetch('JIRA_EMAIL')
+JIRA_API_TOKEN       = ENV.fetch('JIRA_API_TOKEN')
+GITHUB_TOKEN         = ENV.fetch('GITHUB_TOKEN')
+GITHUB_UPSTREAM_REPO = ENV.fetch('GITHUB_UPSTREAM_REPO', 'academia-edu/academia-app')
+GITHUB_FORK_OWNER    = ENV.fetch('GITHUB_FORK_OWNER', 'academia-edu')
+REVIEWER_GITHUB_USER = ENV.fetch('REVIEWER_GITHUB_USER', '')
+TRIGGER_LABEL        = ENV.fetch('TRIGGER_LABEL', 'claude-automate')
+IN_PROGRESS_LABEL    = 'claude-in-progress'
+DONE_LABEL           = 'claude-done'
+REPO_PATH            = ENV.fetch('REPO_PATH', File.expand_path('~/code/academia-app'))
+WORKTREES_PATH       = File.expand_path('~/worktrees')
+LOGS_PATH            = File.expand_path('~/logs')
+CLAUDE_BIN           = ENV.fetch('CLAUDE_BIN', '/home/claude/.local/bin/claude')
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+
+FileUtils.mkdir_p(LOGS_PATH)
+FileUtils.mkdir_p(WORKTREES_PATH)
+
+LOG = Logger.new(File.join(LOGS_PATH, 'jira-claude-poller.log'), 'daily')
+LOG.level = Logger::INFO
+LOG.formatter = proc { |sev, dt, _, msg| "#{dt.strftime('%Y-%m-%dT%H:%M:%S')} [#{sev}] #{msg}\n" }
+
+$stdout.sync = true
+
+# ── Jira API ──────────────────────────────────────────────────────────────────
+
+class JiraClient
+  def initialize(base_url, email, api_token)
+    @base_url = base_url.chomp('/')
+    @auth = Base64.strict_encode64("#{email}:#{api_token}")
+  end
+
+  def find_new_tickets
+    jql = %(labels = "#{TRIGGER_LABEL}" AND labels != "#{IN_PROGRESS_LABEL}" AND labels != "#{DONE_LABEL}" ORDER BY created ASC)
+    response = get('/rest/api/3/search', jql: jql, fields: 'summary,description,assignee,labels', maxResults: 10)
+    JSON.parse(response.body).fetch('issues', [])
+  end
+
+  def add_label(key, label)
+    put("/rest/api/3/issue/#{key}", update: { labels: [{ add: label }] })
+  end
+
+  def remove_label(key, label)
+    put("/rest/api/3/issue/#{key}", update: { labels: [{ remove: label }] })
+  end
+
+  def find_transition_id(key, name_fragment)
+    response = get("/rest/api/3/issue/#{key}/transitions")
+    transitions = JSON.parse(response.body).fetch('transitions', [])
+    match = transitions.find { |t| t['name'].downcase.include?(name_fragment.downcase) }
+    match&.fetch('id')
+  end
+
+  def transition(key, transition_id)
+    post("/rest/api/3/issue/#{key}/transitions", transition: { id: transition_id })
+  end
+
+  def add_comment(key, text)
+    post("/rest/api/3/issue/#{key}/comment", body: adf_doc(text))
+  end
+
+  private
+
+  def adf_doc(text)
+    {
+      type: 'doc', version: 1,
+      content: [{ type: 'paragraph', content: [{ type: 'text', text: text }] }]
+    }
+  end
+
+  def get(path, params = {})
+    request(Net::HTTP::Get, path, params: params)
+  end
+
+  def put(path, body)
+    request(Net::HTTP::Put, path, body: body)
+  end
+
+  def post(path, body)
+    request(Net::HTTP::Post, path, body: body)
+  end
+
+  def request(klass, path, params: {}, body: nil)
+    uri = URI("#{@base_url}#{path}")
+    uri.query = URI.encode_www_form(params) unless params.empty?
+
+    http = Net::HTTP.new(uri.host, uri.port)
+    http.use_ssl = uri.scheme == 'https'
+    http.open_timeout = 15
+    http.read_timeout = 30
+
+    req = klass.new(uri)
+    req['Authorization'] = "Basic #{@auth}"
+    req['Content-Type']  = 'application/json'
+    req['Accept']        = 'application/json'
+    req.body = body.to_json if body
+
+    http.request(req)
+  end
+end
+
+# ── GitHub API ────────────────────────────────────────────────────────────────
+
+class GitHubClient
+  def initialize(token, upstream_repo)
+    @token         = token
+    @upstream_repo = upstream_repo
+  end
+
+  def create_pull_request(title:, head:, body:)
+    response = post("/repos/#{@upstream_repo}/pulls", title: title, head: head, base: 'master', body: body)
+    data = JSON.parse(response.body)
+    raise "GitHub API error: #{data['message']}" if data['message']
+    data['html_url']
+  end
+
+  def request_review(pr_number, reviewers)
+    reviewers = Array(reviewers).reject(&:empty?)
+    return if reviewers.empty?
+    post("/repos/#{@upstream_repo}/pulls/#{pr_number}/requested_reviewers", reviewers: reviewers)
+  end
+
+  private
+
+  def post(path, body)
+    uri  = URI("https://api.github.com#{path}")
+    http = Net::HTTP.new(uri.host, uri.port)
+    http.use_ssl = true
+    http.open_timeout = 15
+    http.read_timeout = 30
+
+    req = Net::HTTP::Post.new(uri)
+    req['Authorization']        = "Bearer #{@token}"
+    req['Accept']               = 'application/vnd.github+json'
+    req['Content-Type']         = 'application/json'
+    req['X-GitHub-Api-Version'] = '2022-11-28'
+    req.body = body.to_json
+
+    http.request(req)
+  end
+end
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+# Recursively extract plain text from a Jira ADF document node.
+def adf_to_text(node)
+  return '' unless node.is_a?(Hash)
+  return node['text'] || '' if node['type'] == 'text'
+
+  suffix = %w[paragraph bulletList orderedList heading].include?(node['type']) ? "\n" : ''
+  prefix = node['type'] == 'listItem' ? '- ' : ''
+  "#{prefix}#{Array(node['content']).map { |c| adf_to_text(c) }.join}#{suffix}"
+end
+
+# Produce a git-safe branch name suffix from a ticket title.
+def branch_slug(text)
+  text.downcase
+      .gsub(/[^a-z0-9\s-]/, '')
+      .strip
+      .gsub(/\s+/, '-')
+      .gsub(/-{2,}/, '-')
+      .slice(0, 48)
+      .sub(/-+$/, '')
+end
+
+# Pull the PR description Claude was asked to emit between sentinel markers.
+def extract_pr_description(output)
+  match = output.match(/===PR_DESCRIPTION_START===\n?(.*?)===PR_DESCRIPTION_END===/m)
+  match ? match[1].strip : nil
+end
+
+# Run a command, streaming stdout+stderr to the log. Returns [combined_output, success?].
+def run_logged(cmd, cwd:, tag:)
+  LOG.info("#{tag}: $ #{cmd.join(' ')}")
+  output = +''
+  Open3.popen2e(*cmd, chdir: cwd) do |_i, io, thr|
+    io.each_line do |line|
+      output << line
+      LOG.debug("#{tag}| #{line.chomp}")
+    end
+    [output, thr.value.success?]
+  end
+end
+
+# ── Prompt ────────────────────────────────────────────────────────────────────
+
+def build_prompt(key, title, desc, branch)
+  <<~PROMPT
+    You are working on Jira ticket #{key}: #{title}
+
+    **Ticket description:**
+    #{desc.strip.empty? ? '(No description provided — use your best judgement based on the title.)' : desc.strip}
+
+    **Your working context:**
+    - You are in a git worktree already checked out on branch `#{branch}` (branched from upstream/master)
+    - `origin` = shared fork (academia-edu/yolo-academia-app)
+    - `upstream` = canonical repo (academia-edu/academia-app)
+    - Rails 8 / React 18 / TypeScript codebase
+    - The Jira MCP server is available if you need more context on this ticket
+
+    **Instructions:**
+    1. Explore the codebase to understand what needs to change
+    2. Implement the changes described in the ticket, following existing patterns
+    3. Write or update tests as appropriate (rspec for Ruby, jest for JS/TS)
+    4. Run linting: `RUBOCOP_SERVER=false bundle exec rubocop -a <file>` for Ruby; `pnpm run lint-fix-single <file>` for JS/TS
+    5. Commit all changes with a clear commit message referencing #{key}
+    6. Do NOT push the branch — the orchestrator will handle pushing and PR creation
+
+    **Required: end your response with a PR description between these exact markers:**
+
+    ===PR_DESCRIPTION_START===
+    ## Summary
+    - [what was changed and why — 2-4 bullets]
+
+    ## Test plan
+    - [how to verify the change works — checklist]
+
+    ## Jira
+    [#{key}](#{JIRA_BASE_URL}/browse/#{key}): #{title}
+
+    🤖 Generated with [Claude Code](https://claude.com/claude-code)
+    ===PR_DESCRIPTION_END===
+  PROMPT
+end
+
+# ── Ticket processor (runs in a child process) ────────────────────────────────
+
+def process_ticket(issue, jira, github)
+  key   = issue['key']
+  title = issue['fields']['summary']
+  desc  = adf_to_text(issue.dig('fields', 'description') || {})
+
+  branch   = "claude/remy/#{key.downcase}-#{branch_slug(title)}"
+  worktree = File.join(WORKTREES_PATH, key)
+
+  LOG.info("#{key}: starting work on \"#{title}\"")
+
+  if File.exist?(worktree)
+    LOG.warn("#{key}: worktree already exists at #{worktree} — skipping to avoid duplicate work")
+    return
+  end
+
+  system("git -C #{REPO_PATH} fetch upstream --quiet 2>&1")
+
+  unless system("git -C #{REPO_PATH} worktree add #{worktree} -b #{branch} upstream/master 2>&1")
+    raise "Failed to create worktree at #{worktree}"
+  end
+
+  prompt = build_prompt(key, title, desc, branch)
+  output, claude_ok = run_logged(
+    [CLAUDE_BIN, '--print', '--no-session-persistence',
+     '--permission-mode', 'bypassPermissions',
+     '--output-format', 'text', prompt],
+    cwd: worktree,
+    tag: key
+  )
+
+  raise "Claude exited non-zero for #{key}" unless claude_ok
+
+  pr_description = extract_pr_description(output) ||
+    "Automated implementation of [#{key}](#{JIRA_BASE_URL}/browse/#{key}): #{title}\n\n" \
+    "🤖 Generated with [Claude Code](https://claude.com/claude-code)"
+
+  _, push_ok = run_logged(['git', 'push', 'origin', branch], cwd: worktree, tag: "#{key}/push")
+  raise "git push failed for #{key}" unless push_ok
+
+  head   = "#{GITHUB_FORK_OWNER}:#{branch}"
+  pr_url = github.create_pull_request(title: "[#{key}] #{title}", head: head, body: pr_description)
+  raise "PR creation returned no URL for #{key}" unless pr_url
+
+  LOG.info("#{key}: PR opened at #{pr_url}")
+
+  pr_number = pr_url.split('/').last.to_i
+  github.request_review(pr_number, REVIEWER_GITHUB_USER)
+
+  if (tid = jira.find_transition_id(key, 'review'))
+    jira.transition(key, tid)
+    LOG.info("#{key}: Jira transitioned to In Review")
+  else
+    LOG.warn("#{key}: no 'review' transition found — Jira status unchanged")
+  end
+
+  reviewer_line = REVIEWER_GITHUB_USER.empty? ? '' : "\nRequested reviewer: @#{REVIEWER_GITHUB_USER}"
+  jira.add_comment(key, "Claude has completed this ticket.\n\nPR: #{pr_url}#{reviewer_line}")
+
+  jira.remove_label(key, IN_PROGRESS_LABEL)
+  jira.add_label(key, DONE_LABEL)
+
+  LOG.info("#{key}: done")
+rescue => e
+  LOG.error("#{key}: FAILED — #{e.message}")
+  LOG.error(e.backtrace.first(8).join("\n"))
+  begin
+    jira.remove_label(key, IN_PROGRESS_LABEL)
+    jira.add_comment(key, "Claude encountered an error and reset this ticket for retry.\n\nError: #{e.message}")
+  rescue => jira_err
+    LOG.error("#{key}: could not reset Jira labels — #{jira_err.message}")
+  end
+ensure
+  if File.exist?(worktree)
+    system("git -C #{REPO_PATH} worktree remove #{worktree} --force 2>/dev/null")
+    LOG.info("#{key}: worktree cleaned up")
+  end
+end
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+#
+# Phase 1 (under lock): poll Jira and claim all new tickets by adding the
+#   in-progress label. This is fast (a few API calls) and must be serial to
+#   prevent two poller instances from claiming the same ticket.
+#
+# Phase 2 (lock released): fork an independent worker process per ticket.
+#   Workers run concurrently and can each take up to an hour or more.
+
+lock_fd = File.open('/tmp/jira-claude-poller.lock', 'w')
+unless lock_fd.flock(File::LOCK_EX | File::LOCK_NB)
+  LOG.info('Another poll is already running — exiting')
+  exit 0
+end
+
+claimed = []
+
+begin
+  jira   = JiraClient.new(JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN)
+  github = GitHubClient.new(GITHUB_TOKEN, GITHUB_UPSTREAM_REPO)
+
+  tickets = jira.find_new_tickets
+  if tickets.empty?
+    LOG.info('Poll: no new tickets')
+  else
+    LOG.info("Poll: found #{tickets.length} ticket(s) — #{tickets.map { |t| t['key'] }.join(', ')}")
+    tickets.each do |issue|
+      key = issue['key']
+      jira.add_label(key, IN_PROGRESS_LABEL)
+      claimed << issue
+      LOG.info("#{key}: claimed")
+    rescue => e
+      LOG.error("#{key}: failed to claim — #{e.message}")
+    end
+  end
+rescue => e
+  LOG.error("Poll error: #{e.message}\n#{e.backtrace.first(5).join("\n")}")
+  exit 1
+ensure
+  lock_fd.flock(File::LOCK_UN)
+  lock_fd.close
+end
+
+# Spawn one independent worker per claimed ticket and detach immediately.
+claimed.each do |issue|
+  pid = Process.fork { process_ticket(issue, jira, github) }
+  Process.detach(pid)
+  LOG.info("#{issue['key']}: worker spawned (pid #{pid})")
+end
