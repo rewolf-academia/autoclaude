@@ -13,7 +13,7 @@
 # Each ticket is handled by an independent background process, so multiple
 # tickets can be worked on simultaneously.
 #
-# Required env vars (set in ~/.jira-claude.env, loaded by the systemd service):
+# Required env vars (set in ~/.autoclaude.env, loaded by the systemd service):
 #   JIRA_BASE_URL          e.g. https://academia-edu.atlassian.net
 #   JIRA_EMAIL             your Jira login email
 #   JIRA_API_TOKEN         Jira API token (id.atlassian.com → Security → API tokens)
@@ -50,7 +50,7 @@ CLAUDE_BIN           = ENV.fetch('CLAUDE_BIN', '/home/claude/.local/bin/claude')
 FileUtils.mkdir_p(LOGS_PATH)
 FileUtils.mkdir_p(WORKTREES_PATH)
 
-LOG = Logger.new(File.join(LOGS_PATH, 'jira-claude-poller.log'), 'daily')
+LOG = Logger.new(File.join(LOGS_PATH, 'autoclaude-poller.log'), 'daily')
 LOG.level = Logger::INFO
 LOG.formatter = proc { |sev, dt, _, msg| "#{dt.strftime('%Y-%m-%dT%H:%M:%S')} [#{sev}] #{msg}\n" }
 
@@ -232,7 +232,7 @@ end
 # Phase 2 (lock released): fork one independent worker per claimed item.
 #   Workers run concurrently and can each take up to an hour or more.
 
-lock_fd = File.open('/tmp/jira-claude-poller.lock', 'w')
+lock_fd = File.open('/tmp/autoclaude-poller.lock', 'w')
 unless lock_fd.flock(File::LOCK_EX | File::LOCK_NB)
   LOG.info('Another poll is already running — exiting')
   exit 0

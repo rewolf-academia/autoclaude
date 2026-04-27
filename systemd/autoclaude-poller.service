@@ -1,13 +1,13 @@
 [Unit]
-Description=Jira Claude Code Poller (one-shot)
+Description=AutoClaude Poller (one-shot)
 After=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=%h/bin/jira-claude-poller
-EnvironmentFile=%h/.jira-claude.env
-StandardOutput=append:%h/logs/jira-claude-poller.log
-StandardError=append:%h/logs/jira-claude-poller.log
+ExecStart=%h/bin/autoclaude-poller
+EnvironmentFile=%h/.autoclaude.env
+StandardOutput=append:%h/logs/autoclaude-poller.log
+StandardError=append:%h/logs/autoclaude-poller.log
 
 # The poller itself exits quickly; worker processes it forks are detached
 # and not tracked by systemd — this timeout covers just the poll phase.
