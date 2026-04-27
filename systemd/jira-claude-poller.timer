@@ -1,9 +1,9 @@
 [Unit]
-Description=Poll Jira for Claude Code tickets every 2 minutes
+Description=Poll Jira for Claude Code tickets every 5 minutes
 
 [Timer]
 OnBootSec=1min
-OnUnitActiveSec=2min
+OnUnitActiveSec=5min
 Unit=jira-claude-poller.service
 
 [Install]

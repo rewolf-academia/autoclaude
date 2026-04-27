@@ -76,6 +76,36 @@ def build_prompt(key, title, desc, branch, pr_template)
   PROMPT
 end
 
+def build_review_prompt(key, title, branch, pr_url, comments)
+  formatted_comments = comments.map.with_index(1) do |c, i|
+    if c['path']
+      header = "**Comment #{i} — @#{c.dig('user', 'login')} on `#{c['path']}` line #{c['line'] || c['original_line']}:**"
+    else
+      header = "**Comment #{i} — @#{c.dig('user', 'login')}:**"
+    end
+    "#{header}\n#{c['body']}"
+  end.join("\n\n---\n\n")
+
+  <<~PROMPT
+    You are addressing human review comments on a pull request.
+
+    **Jira ticket:** [#{key}](#{JIRA_BASE_URL}/browse/#{key}): #{title}
+    **PR:** #{pr_url}
+    **Branch:** #{branch}
+
+    **Human review comments to address (#{comments.length} total):**
+
+    #{formatted_comments}
+
+    **Instructions:**
+    1. Read each comment carefully and make the requested code changes
+    2. Run linting on any changed files: `RUBOCOP_SERVER=false bundle exec rubocop -a <file>` for Ruby; `pnpm run lint-fix-single <file>` for JS/TS
+    3. Commit all changes with a message like "Address review comments for #{key}"
+    4. Do NOT push — the orchestrator handles pushing
+    5. Do NOT reply to or resolve the review comments — just make the code changes
+  PROMPT
+end
+
 def process_ticket(issue, jira, github)
   key   = issue['key']
   title = issue['fields']['summary']
@@ -136,7 +166,7 @@ def process_ticket(issue, jira, github)
   jira.add_comment(key, "Claude has completed this ticket.\n\nPR: #{pr_url}#{reviewer_line}")
 
   jira.remove_label(key, IN_PROGRESS_LABEL)
-  jira.add_label(key, DONE_LABEL)
+  jira.add_label(key, IN_REVIEW_LABEL)
 
   LOG.info("#{key}: done")
 rescue => e
@@ -152,5 +182,60 @@ ensure
   if File.exist?(worktree)
     system("git -C #{REPO_PATH} worktree remove #{worktree} --force 2>/dev/null")
     LOG.info("#{key}: worktree cleaned up")
+  end
+end
+
+def process_review_comments(issue, pr, comments, jira)
+  key      = issue['key']
+  title    = issue['fields']['summary']
+  branch   = pr['head']['ref']
+  pr_url   = pr['html_url']
+  worktree = File.join(WORKTREES_PATH, "#{key}-review")
+
+  LOG.info("#{key}: addressing #{comments.length} review comment(s) on #{pr_url}")
+
+  if File.exist?(worktree)
+    LOG.warn("#{key}: review worktree already exists — skipping to avoid duplicate work")
+    return
+  end
+
+  # Fetch latest state of the branch, reset local ref, then create worktree
+  system("git -C #{REPO_PATH} fetch origin #{branch} --quiet 2>&1")
+  system("git -C #{REPO_PATH} branch -D #{branch} 2>/dev/null; true")
+  unless system("git -C #{REPO_PATH} worktree add -b #{branch} #{worktree} origin/#{branch} 2>&1")
+    raise "Failed to create review worktree for #{key}"
+  end
+
+  prompt = build_review_prompt(key, title, branch, pr_url, comments)
+  _, claude_ok = run_logged(
+    [CLAUDE_BIN, '--print', '--no-session-persistence',
+     '--permission-mode', 'bypassPermissions',
+     '--output-format', 'text', prompt],
+    cwd: worktree,
+    tag: "#{key}/review"
+  )
+
+  raise "Claude exited non-zero addressing review for #{key}" unless claude_ok
+
+  _, push_ok = run_logged(['git', 'push', 'origin', branch], cwd: worktree, tag: "#{key}/review-push")
+  raise "git push failed for #{key} review" unless push_ok
+
+  jira.remove_label(key, IN_PROGRESS_LABEL)
+  jira.add_comment(key, "Claude has addressed the review comments on #{pr_url}")
+
+  LOG.info("#{key}: review comments addressed")
+rescue => e
+  LOG.error("#{key}: review FAILED — #{e.message}")
+  LOG.error(e.backtrace.first(8).join("\n"))
+  begin
+    jira.remove_label(key, IN_PROGRESS_LABEL)
+    jira.add_comment(key, "Claude encountered an error addressing review comments.\n\nError: #{e.message}")
+  rescue => jira_err
+    LOG.error("#{key}: could not reset Jira labels — #{jira_err.message}")
+  end
+ensure
+  if File.exist?(worktree)
+    system("git -C #{REPO_PATH} worktree remove #{worktree} --force 2>/dev/null")
+    LOG.info("#{key}: review worktree cleaned up")
   end
 end
