@@ -65,13 +65,13 @@ class JiraClient
   end
 
   def find_new_tickets
-    jql = %(labels = "#{TRIGGER_LABEL}" AND labels != "#{IN_PROGRESS_LABEL}" AND labels != "#{IN_REVIEW_LABEL}" ORDER BY created ASC)
+    jql = %(labels = "#{TRIGGER_LABEL}" AND labels != "#{IN_PROGRESS_LABEL}" AND labels != "#{IN_REVIEW_LABEL}" AND assignee = currentUser() ORDER BY created ASC)
     response = get('/rest/api/3/search', jql: jql, fields: 'summary,description,assignee,labels', maxResults: 10)
     JSON.parse(response.body).fetch('issues', [])
   end
 
   def find_in_review_tickets
-    jql = %(labels = "#{IN_REVIEW_LABEL}" AND labels != "#{IN_PROGRESS_LABEL}" ORDER BY created ASC)
+    jql = %(labels = "#{IN_REVIEW_LABEL}" AND labels != "#{IN_PROGRESS_LABEL}" AND assignee = currentUser() ORDER BY created ASC)
     response = get('/rest/api/3/search', jql: jql, fields: 'summary,description,assignee,labels', maxResults: 20)
     JSON.parse(response.body).fetch('issues', [])
   end
