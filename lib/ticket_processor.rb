@@ -1,10 +1,13 @@
 # frozen_string_literal: true
 
-# Helpers and ticket processing logic for individual Jira tickets.
-# Constants (JIRA_BASE_URL, REPO_PATH, etc.), LOG, and the API clients
-# are defined in the main poller script that requires this file.
-
 require 'open3'
+
+JIRA_BASE_URL        = ENV.fetch('JIRA_BASE_URL')
+GITHUB_FORK_OWNER    = ENV.fetch('GITHUB_FORK_OWNER', 'academia-edu')
+REVIEWER_GITHUB_USER = ENV.fetch('REVIEWER_GITHUB_USER', '')
+REPO_PATH            = ENV.fetch('REPO_PATH', File.expand_path('~/code/academia-app'))
+WORKTREES_PATH       = File.expand_path('~/worktrees')
+CLAUDE_BIN           = ENV.fetch('CLAUDE_BIN', '/home/claude/.local/bin/claude')
 
 def adf_to_text(node)
   return '' unless node.is_a?(Hash)
