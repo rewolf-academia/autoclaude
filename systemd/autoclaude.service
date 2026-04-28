@@ -4,10 +4,10 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=%h/bin/autoclaude-poller
+ExecStart=%h/bin/autoclaude
 EnvironmentFile=%h/.autoclaude.env
-StandardOutput=append:%h/logs/autoclaude-poller.log
-StandardError=append:%h/logs/autoclaude-poller.log
+StandardOutput=append:%h/logs/autoclaude.log
+StandardError=append:%h/logs/autoclaude.log
 
 # The poller itself exits quickly; worker processes it forks are detached
 # and not tracked by systemd — this timeout covers just the poll phase.

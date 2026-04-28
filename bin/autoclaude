@@ -1,0 +1,5 @@
+#!/home/claude/code/rbenv/shims/ruby
+
+require_relative '../lib/poller'
+
+run_poller

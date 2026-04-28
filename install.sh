@@ -7,15 +7,15 @@ echo "Installing autoclaude from $REPO_DIR..."
 
 # Symlink the poller into ~/bin so it stays up-to-date with repo changes
 mkdir -p "$HOME/bin"
-ln -sf "$REPO_DIR/bin/autoclaude-poller" "$HOME/bin/autoclaude-poller"
-chmod +x "$REPO_DIR/bin/autoclaude-poller"
-echo "  → ~/bin/autoclaude-poller (symlink)"
+ln -sf "$REPO_DIR/bin/autoclaude" "$HOME/bin/autoclaude"
+chmod +x "$REPO_DIR/bin/autoclaude"
+echo "  → ~/bin/autoclaude (symlink)"
 
 # Install systemd user units
 mkdir -p "$HOME/.config/systemd/user"
-cp "$REPO_DIR/systemd/autoclaude-poller.service" "$HOME/.config/systemd/user/"
-cp "$REPO_DIR/systemd/autoclaude-poller.timer"   "$HOME/.config/systemd/user/"
-echo "  → ~/.config/systemd/user/autoclaude-poller.{service,timer}"
+cp "$REPO_DIR/systemd/autoclaude.service" "$HOME/.config/systemd/user/"
+cp "$REPO_DIR/systemd/autoclaude.timer"   "$HOME/.config/systemd/user/"
+echo "  → ~/.config/systemd/user/autoclaude.{service,timer}"
 
 # Create credentials file from example if it doesn't already exist
 if [ ! -f "$HOME/.autoclaude.env" ]; then
@@ -36,6 +36,6 @@ echo "  → systemd daemon reloaded"
 echo ""
 echo "Done. Next steps:"
 echo "  1. Fill in ~/.autoclaude.env with your Jira API token and GitHub token"
-echo "  2. Test manually: source ~/.autoclaude.env && ~/bin/autoclaude-poller"
-echo "  3. Enable the timer: systemctl --user enable --now autoclaude-poller.timer"
-echo "  4. Watch logs: tail -f ~/logs/autoclaude-poller.log"
+echo "  2. Test manually: source ~/.autoclaude.env && ~/bin/autoclaude"
+echo "  3. Enable the timer: systemctl --user enable --now autoclaude.timer"
+echo "  4. Watch logs: tail -f ~/logs/autoclaude.log"

@@ -4,7 +4,7 @@ Description=AutoClaude Poller — runs every 5 minutes
 [Timer]
 OnBootSec=1min
 OnUnitActiveSec=5min
-Unit=autoclaude-poller.service
+Unit=autoclaude.service
 
 [Install]
 WantedBy=timers.target

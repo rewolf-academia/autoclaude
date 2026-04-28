@@ -4,7 +4,7 @@ Polls Jira for tickets labeled `claude-automate`, runs Claude Code on each one i
 
 ## How it works
 
-1. A systemd timer fires every 5 minutes and runs `bin/autoclaude-poller`
+1. A systemd timer fires every 5 minutes and runs `bin/autoclaude`
 2. The poller acquires a file lock, finds unclaimed tickets, and stamps each one `claude-in-progress`
 3. One background worker process is forked per ticket
 4. Each worker creates a git worktree, runs Claude Code with full `bypassPermissions`, then pushes the branch and opens a PR against upstream
@@ -27,30 +27,30 @@ $EDITOR ~/.autoclaude.env
 
 ```bash
 # Enable and start the timer (survives reboots)
-systemctl --user enable --now autoclaude-poller.timer
+systemctl --user enable --now autoclaude.timer
 
 # Stop the timer (in-flight workers keep running until they finish)
-systemctl --user stop autoclaude-poller.timer
+systemctl --user stop autoclaude.timer
 
 # Disable the timer so it doesn't start on next login
-systemctl --user disable autoclaude-poller.timer
+systemctl --user disable autoclaude.timer
 
 # Trigger a one-shot run immediately (without waiting for the 5-minute tick)
-systemctl --user start autoclaude-poller.service
+systemctl --user start autoclaude.service
 ```
 
 ## Status and logs
 
 ```bash
 # Timer and service status
-systemctl --user status autoclaude-poller.timer
-systemctl --user status autoclaude-poller.service
+systemctl --user status autoclaude.timer
+systemctl --user status autoclaude.service
 
 # Structured poller log (one file per day)
-tail -f ~/logs/autoclaude-poller.log
+tail -f ~/logs/autoclaude.log
 
 # systemd journal (captures stdout/stderr from the service unit)
-journalctl --user -u autoclaude-poller.service -f
+journalctl --user -u autoclaude.service -f
 ```
 
 ## Triggering a ticket
@@ -73,7 +73,7 @@ All configuration lives in `~/.autoclaude.env`. See `.env.example` for the full 
 ## File layout
 
 ```
-bin/autoclaude-poller    # Entry point: polling, locking, claiming tickets, spawning workers
+bin/autoclaude           # Entry point: polling, locking, claiming tickets, spawning workers
 lib/ticket_processor.rb  # Worker logic: worktree setup, Claude execution, PR creation, Jira updates
 systemd/                 # Service and timer unit files
 install.sh               # One-time setup script
