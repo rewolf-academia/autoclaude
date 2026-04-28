@@ -75,8 +75,8 @@ All configuration lives in `~/.autoclaude.env`. See `.env.example` for the full 
 ## File layout
 
 ```
-bin/autoclaude           # Entry point: polling, locking, claiming tickets, spawning workers
-lib/ticket_processor.rb  # Worker logic: worktree setup, Claude execution, PR creation, Jira updates
+bin/autoclaude           # Entry point used by systemd
+lib/                     # Poller, orchestrator, and ticket processor Ruby classes
 systemd/                 # Service and timer unit files
 install.sh               # One-time setup script
 ```
