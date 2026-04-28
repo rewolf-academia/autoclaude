@@ -12,18 +12,19 @@ IN_REVIEW_LABEL   = 'claude-in-review'
 class JiraClient
   def initialize(base_url, email, api_token)
     @base_url = base_url.chomp('/')
-    @auth = Base64.strict_encode64("#{email}:#{api_token}")
+    @email = email
+    @api_token = api_token
   end
 
   def find_new_tickets
     jql = %(labels = "#{TRIGGER_LABEL}" AND labels != "#{IN_PROGRESS_LABEL}" AND labels != "#{IN_REVIEW_LABEL}" AND assignee = currentUser() ORDER BY created ASC)
-    response = get('/rest/api/3/search', jql: jql, fields: 'summary,description,assignee,labels', maxResults: 10)
+    response = get('/rest/api/3/search/jql', jql: jql, fields: 'summary,description,assignee,labels', maxResults: 10)
     JSON.parse(response.body).fetch('issues', [])
   end
 
   def find_in_review_tickets
     jql = %(labels = "#{IN_REVIEW_LABEL}" AND labels != "#{IN_PROGRESS_LABEL}" AND assignee = currentUser() ORDER BY created ASC)
-    response = get('/rest/api/3/search', jql: jql, fields: 'summary,description,assignee,labels', maxResults: 20)
+    response = get('/rest/api/3/search/jql', jql: jql, fields: 'summary,description,assignee,labels', maxResults: 20)
     JSON.parse(response.body).fetch('issues', [])
   end
 
@@ -81,7 +82,7 @@ class JiraClient
     http.read_timeout = 30
 
     req = klass.new(uri)
-    req['Authorization'] = "Basic #{@auth}"
+    req.basic_auth(@email, @api_token)
     req['Content-Type']  = 'application/json'
     req['Accept']        = 'application/json'
     req.body = body.to_json if body
