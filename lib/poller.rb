@@ -29,7 +29,9 @@ require_relative 'ticket_processor'
 JIRA_EMAIL           = ENV.fetch('JIRA_EMAIL')
 JIRA_API_TOKEN       = ENV.fetch('JIRA_API_TOKEN')
 GITHUB_TOKEN         = ENV.fetch('GITHUB_TOKEN')
-GITHUB_UPSTREAM_REPO = ENV.fetch('GITHUB_UPSTREAM_REPO', 'academia-edu/academia-app')
+GITHUB_UPSTREAM_REPO = ENV.fetch('GITHUB_UPSTREAM_REPO', 'academia-app')
+GITHUB_FORK_REPO     = ENV.fetch('GITHUB_FORK_REPO', 'yolo-academia-app')
+GITHUB_ORG           = ENV.fetch('GITHUB_ORG', 'academia-edu')
 LOGS_PATH            = File.expand_path('~/logs')
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -63,7 +65,9 @@ def run_poller
 
   begin
     jira   = JiraClient.new(JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN)
-    github = GitHubClient.new(GITHUB_TOKEN, GITHUB_UPSTREAM_REPO)
+    upstream_repo = "#{GITHUB_ORG}/#{GITHUB_UPSTREAM_REPO}"
+    fork_repo = "#{GITHUB_ORG}/#{GITHUB_FORK_REPO}"
+    github = GitHubClient.new(GITHUB_TOKEN, upstream_repo, fork_repo)
     claimed, claimed_reviews = poll(jira: jira, github: github)
   rescue => e
     LOG.error("Poll error: #{e.message}\n#{e.backtrace.first(5).join("\n")}")

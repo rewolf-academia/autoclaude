@@ -92,13 +92,21 @@ class JiraClient
 end
 
 class GitHubClient
-  def initialize(token, upstream_repo)
+  def initialize(token, upstream_repo, fork_repo)
     @token         = token
     @upstream_repo = upstream_repo
+    @fork_repo     = fork_repo
   end
 
   def create_pull_request(title:, head:, body:)
-    response = post("/repos/#{@upstream_repo}/pulls", title: title, head: head, base: 'master', body: body)
+    response = post(
+      "/repos/#{@upstream_repo}/pulls",
+      title: title,
+      head: head,
+      head_repo: @fork_repo,
+      base: 'master',
+      body: body
+    )
     data = JSON.parse(response.body)
     raise "GitHub API error: #{data['message']}" if data['message']
     data['html_url']
@@ -145,7 +153,7 @@ class GitHubClient
     req = Net::HTTP::Get.new(uri)
     req['Authorization']        = "Bearer #{@token}"
     req['Accept']               = 'application/vnd.github+json'
-    req['X-GitHub-Api-Version'] = '2022-11-28'
+    req['X-GitHub-Api-Version'] = '2026-03-10'
 
     http.request(req)
   end
@@ -161,7 +169,7 @@ class GitHubClient
     req['Authorization']        = "Bearer #{@token}"
     req['Accept']               = 'application/vnd.github+json'
     req['Content-Type']         = 'application/json'
-    req['X-GitHub-Api-Version'] = '2022-11-28'
+    req['X-GitHub-Api-Version'] = '2026-03-10'
     req.body = body.to_json
 
     http.request(req)

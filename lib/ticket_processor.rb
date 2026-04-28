@@ -149,14 +149,15 @@ def process_ticket(issue, jira, github)
   _, push_ok = run_logged(['git', 'push', 'origin', branch], cwd: worktree, tag: "#{key}/push")
   raise "git push failed for #{key}" unless push_ok
 
-  head   = "#{GITHUB_FORK_OWNER}:#{branch}"
+  head   = "#{GITHUB_ORG}:#{branch}"
   pr_url = github.create_pull_request(title: "[#{key}] #{title}", head: head, body: pr_description)
   raise "PR creation returned no URL for #{key}" unless pr_url
 
   LOG.info("#{key}: PR opened at #{pr_url}")
 
   pr_number = pr_url.split('/').last.to_i
-  github.request_review(pr_number, REVIEWER_GITHUB_USER)
+  # TODO: this doesn't work currently since you can't request review from the PR author
+  # github.request_review(pr_number, REVIEWER_GITHUB_USER)
 
   if (tid = jira.find_transition_id(key, 'review'))
     jira.transition(key, tid)
@@ -165,7 +166,7 @@ def process_ticket(issue, jira, github)
     LOG.warn("#{key}: no 'review' transition found — Jira status unchanged")
   end
 
-  reviewer_line = REVIEWER_GITHUB_USER.empty? ? '' : "\nRequested reviewer: @#{REVIEWER_GITHUB_USER}"
+  # reviewer_line = REVIEWER_GITHUB_USER.empty? ? '' : "\nRequested reviewer: @#{REVIEWER_GITHUB_USER}"
   jira.add_comment(key, "Claude has completed this ticket.\n\nPR: #{pr_url}#{reviewer_line}")
 
   jira.remove_label(key, IN_PROGRESS_LABEL)

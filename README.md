@@ -61,14 +61,16 @@ Add the `claude-automate` label to any Jira ticket. The poller will pick it up w
 
 All configuration lives in `~/.autoclaude.env`. See `.env.example` for the full list of variables. Required:
 
-| Variable | Description |
-|---|---|
-| `JIRA_BASE_URL` | e.g. `https://your-org.atlassian.net` |
-| `JIRA_EMAIL` | Your Jira login email |
-| `JIRA_API_TOKEN` | [Create here](https://id.atlassian.com/manage-profile/security/api-tokens) |
-| `GITHUB_TOKEN` | PAT with `repo` + `pull_requests:write` scopes |
-| `GITHUB_UPSTREAM_REPO` | e.g. `your-org/your-repo` |
-| `GITHUB_FORK_OWNER` | GitHub user/org that owns the fork |
+| Variable               | Description                                                                |
+|------------------------|----------------------------------------------------------------------------|
+| `JIRA_BASE_URL`        | e.g. `https://your-org.atlassian.net`                                      |
+| `JIRA_EMAIL`           | Your Jira login email                                                      |
+| `JIRA_API_TOKEN`       | [Create here](https://id.atlassian.com/manage-profile/security/api-tokens) |
+| `GITHUB_TOKEN`         | PAT with `repo` + `pull_requests:write` scopes                             |
+| `GITHUB_UPSTREAM_REPO` | The repo that PRs will be based on, e.g. `your-org/your-repo`              |
+| `GITHUB_FORK_REPO`     | The repo that branches will be made on, e.g. `your-org/your-fork-repo`     |
+| `GITHUB_ORG`           | GitHub user/org that owns the repos                                        |
+
 
 ## File layout
 
