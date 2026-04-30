@@ -12,3 +12,6 @@ StandardError=append:%h/logs/autoclaude.log
 # The poller itself exits quickly; worker processes it forks are detached
 # and not tracked by systemd — this timeout covers just the poll phase.
 TimeoutStartSec=60
+
+# Don't kill forked worker processes when the poller exits.
+KillMode=none

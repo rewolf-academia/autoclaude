@@ -114,7 +114,14 @@ def process_ticket(issue, jira, github)
   title = issue['fields']['summary']
   desc  = adf_to_text(issue.dig('fields', 'description') || {})
 
-  branch   = "claude/remy/#{key.downcase}-#{branch_slug(title)}"
+  if (tid = jira.find_transition_id(key, 'progress'))
+    jira.transition(key, tid)
+    LOG.info("#{key}: Jira transitioned to In Progress")
+  else
+    LOG.warn("#{key}: no 'progress' transition found — Jira status unchanged")
+  end
+
+  branch   = "autoclaude-#{key.downcase}--#{branch_slug(title)}"
   worktree = File.join(WORKTREES_PATH, key)
 
   LOG.info("#{key}: starting work on \"#{title}\"")
@@ -155,7 +162,7 @@ def process_ticket(issue, jira, github)
 
   LOG.info("#{key}: PR opened at #{pr_url}")
 
-  pr_number = pr_url.split('/').last.to_i
+  # pr_number = pr_url.split('/').last.to_i
   # TODO: this doesn't work currently since you can't request review from the PR author
   # github.request_review(pr_number, REVIEWER_GITHUB_USER)
 
@@ -167,7 +174,8 @@ def process_ticket(issue, jira, github)
   end
 
   # reviewer_line = REVIEWER_GITHUB_USER.empty? ? '' : "\nRequested reviewer: @#{REVIEWER_GITHUB_USER}"
-  jira.add_comment(key, "Claude has completed this ticket.\n\nPR: #{pr_url}#{reviewer_line}")
+  # jira.add_comment(key, "Claude has completed this ticket.\n\nPR: #{pr_url}#{reviewer_line}")
+  jira.add_comment(key, "Claude has completed this ticket.\n\nPR: #{pr_url}")
 
   jira.remove_label(key, IN_PROGRESS_LABEL)
   jira.add_label(key, IN_REVIEW_LABEL)
