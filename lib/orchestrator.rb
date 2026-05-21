@@ -57,6 +57,7 @@ def poll(jira:, github:)
       human_comments = all_comments
         .reject { |c| c.dig('user', 'type') == 'Bot' }
         .reject { |c| c.dig('user', 'login').to_s.end_with?('[bot]') }
+        .reject { |c| c.dig('state') == 'PENDING' }
         .select do |c|
           comment_at = c['submitted_at'] || c['updated_at']
           Time.parse(comment_at) > last_push_at
