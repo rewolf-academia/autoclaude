@@ -42,13 +42,18 @@ class GitHubClient
     JSON.parse(response.body)
   end
 
-  def pr_review_comments(pr_number)
+  def pr_line_comments(pr_number)
     response = get("/repos/#{@upstream_repo}/pulls/#{pr_number}/comments", per_page: 100)
     JSON.parse(response.body)
   end
 
   def pr_issue_comments(pr_number)
     response = get("/repos/#{@upstream_repo}/issues/#{pr_number}/comments", per_page: 100)
+    JSON.parse(response.body)
+  end
+
+  def pr_review_comments(pr_number)
+    response = get("/repos/#{@upstream_repo}/pulls/#{pr_number}/reviews", per_page: 100)
     JSON.parse(response.body)
   end
 

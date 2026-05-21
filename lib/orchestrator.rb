@@ -51,12 +51,16 @@ def poll(jira:, github:)
       last_push_at = Time.parse(commits.last['commit']['committer']['date'])
 
       all_comments = github.pr_review_comments(pr['number']) +
-                     github.pr_issue_comments(pr['number'])
+                     github.pr_issue_comments(pr['number']) +
+                     github.pr_line_comments(pr['number'])
 
       human_comments = all_comments
         .reject { |c| c.dig('user', 'type') == 'Bot' }
         .reject { |c| c.dig('user', 'login').to_s.end_with?('[bot]') }
-        .select { |c| Time.parse(c['created_at']) > last_push_at }
+        .select do |c|
+          comment_at = c['submitted_at'] || c['updated_at']
+          Time.parse(comment_at) > last_push_at
+        end
 
       if human_comments.empty?
         LOG.info("#{key}: no new human comments since last push")
