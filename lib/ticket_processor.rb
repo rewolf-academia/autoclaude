@@ -20,76 +20,92 @@ rescue => e
   ''
 end
 
-def adf_to_text(node)
+def adf_to_text(node, counter = [0])
   return '' unless node.is_a?(Hash)
   return node['text'] || '' if node['type'] == 'text'
-  return "[image]\n" if node['type'] == 'media'
+  if node['type'] == 'media'
+    counter[0] += 1
+    return "[image #{counter[0]}]\n"
+  end
 
   suffix = %w[paragraph bulletList orderedList heading].include?(node['type']) ? "\n" : ''
   prefix = node['type'] == 'listItem' ? '- ' : ''
-  "#{prefix}#{Array(node['content']).map { |c| adf_to_text(c) }.join}#{suffix}"
+  "#{prefix}#{Array(node['content']).map { |c| adf_to_text(c, counter) }.join}#{suffix}"
 end
 
-def adf_extract_external_images(node)
+def adf_media_refs(node)
   return [] unless node.is_a?(Hash)
   results = []
-  if node['type'] == 'media' && node.dig('attrs', 'type') == 'external'
-    url = node.dig('attrs', 'url') || node.dig('attrs', 'id')
-    results << url if url
+  if node['type'] == 'media'
+    if node.dig('attrs', 'type') == 'external'
+      url = node.dig('attrs', 'url') || node.dig('attrs', 'id')
+      results << { kind: :external, url: url } if url
+    else
+      results << { kind: :file }
+    end
   end
-  Array(node['content']).each { |c| results.concat(adf_extract_external_images(c)) }
+  Array(node['content']).each { |c| results.concat(adf_media_refs(c)) }
   results
 end
 
 IMAGE_SIZE_LIMIT = 5 * 1024 * 1024 # 5 MB
 
 def download_ticket_images(issue, jira)
-  adf = issue.dig('fields', 'description') || {}
+  adf  = issue.dig('fields', 'description') || {}
+  refs = adf_media_refs(adf)
   tempfiles = []
 
-  # Jira-hosted image attachments
-  Array(issue.dig('fields', 'attachment')).each do |att|
+  attachment_queue = Array(issue.dig('fields', 'attachment'))
+    .select { |att| att['mimeType'].to_s.start_with?('image/') }
+
+  download_attachment = lambda do |att|
     mime = att['mimeType'].to_s
-    next unless mime.start_with?('image/')
+    content, content_type = jira.download_attachment(att['content'])
+    return unless content && content.bytesize <= IMAGE_SIZE_LIMIT
 
-    begin
-      content, content_type = jira.download_attachment(att['content'])
-      next unless content && content.bytesize <= IMAGE_SIZE_LIMIT
+    mime_clean = (content_type || mime).split(';').first.strip
+    ext = mime_clean.split('/').last
+    tmp = Tempfile.new(['autoclaude_img', ".#{ext}"])
+    tmp.binmode
+    tmp.write(content)
+    tmp.flush
+    tempfiles << { file: tmp, media_type: mime_clean }
+  rescue => e
+    LOG.warn("Could not download attachment #{att['filename']}: #{e.message}")
+  end
 
-      mime_clean = (content_type || mime).split(';').first.strip
-      ext = mime_clean.split('/').last
-      tmp = Tempfile.new(['autoclaude_img', ".#{ext}"])
-      tmp.binmode
-      tmp.write(content)
-      tmp.flush
-      tempfiles << { file: tmp, media_type: mime_clean }
-    rescue => e
-      LOG.warn("Could not download attachment #{att['filename']}: #{e.message}")
+  download_external = lambda do |url|
+    uri = URI(url)
+    response = Net::HTTP.get_response(uri)
+    if response.is_a?(Net::HTTPRedirection)
+      response = Net::HTTP.get_response(URI(response['location']))
+    end
+    content = response.body
+    content_type = response['content-type'].to_s.split(';').first.strip
+    return unless content_type.start_with?('image/') && content.bytesize <= IMAGE_SIZE_LIMIT
+
+    ext = content_type.split('/').last
+    tmp = Tempfile.new(['autoclaude_img', ".#{ext}"])
+    tmp.binmode
+    tmp.write(content)
+    tmp.flush
+    tempfiles << { file: tmp, media_type: content_type }
+  rescue => e
+    LOG.warn("Could not download external image #{url}: #{e.message}")
+  end
+
+  # Download images in ADF traversal order so [image N] labels match the array index
+  refs.each do |ref|
+    if ref[:kind] == :external
+      download_external.call(ref[:url])
+    else
+      att = attachment_queue.shift
+      download_attachment.call(att) if att
     end
   end
 
-  # External images embedded in the description ADF
-  adf_extract_external_images(adf).each do |url|
-    begin
-      uri = URI(url)
-      response = Net::HTTP.get_response(uri)
-      if response.is_a?(Net::HTTPRedirection)
-        response = Net::HTTP.get_response(URI(response['location']))
-      end
-      content = response.body
-      content_type = response['content-type'].to_s.split(';').first.strip
-      next unless content_type.start_with?('image/') && content.bytesize <= IMAGE_SIZE_LIMIT
-
-      ext = content_type.split('/').last
-      tmp = Tempfile.new(['autoclaude_img', ".#{ext}"])
-      tmp.binmode
-      tmp.write(content)
-      tmp.flush
-      tempfiles << { file: tmp, media_type: content_type }
-    rescue => e
-      LOG.warn("Could not download external image #{url}: #{e.message}")
-    end
-  end
+  # Append any remaining attachments not embedded in the ADF description
+  attachment_queue.each { |att| download_attachment.call(att) }
 
   tempfiles
 end
