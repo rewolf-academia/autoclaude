@@ -1,6 +1,8 @@
 # frozen_string_literal: true
 
 require 'open3'
+require 'base64'
+require 'tempfile'
 
 JIRA_BASE_URL        = ENV.fetch('JIRA_BASE_URL')
 GITHUB_FORK_OWNER    = ENV.fetch('GITHUB_FORK_OWNER', 'academia-edu')
@@ -12,10 +14,75 @@ CLAUDE_BIN           = ENV.fetch('CLAUDE_BIN', '/home/claude/.local/bin/claude')
 def adf_to_text(node)
   return '' unless node.is_a?(Hash)
   return node['text'] || '' if node['type'] == 'text'
+  return "[image]\n" if node['type'] == 'media'
 
   suffix = %w[paragraph bulletList orderedList heading].include?(node['type']) ? "\n" : ''
   prefix = node['type'] == 'listItem' ? '- ' : ''
   "#{prefix}#{Array(node['content']).map { |c| adf_to_text(c) }.join}#{suffix}"
+end
+
+def adf_extract_external_images(node)
+  return [] unless node.is_a?(Hash)
+  results = []
+  if node['type'] == 'media' && node.dig('attrs', 'type') == 'external'
+    url = node.dig('attrs', 'url') || node.dig('attrs', 'id')
+    results << url if url
+  end
+  Array(node['content']).each { |c| results.concat(adf_extract_external_images(c)) }
+  results
+end
+
+IMAGE_SIZE_LIMIT = 5 * 1024 * 1024 # 5 MB
+
+def download_ticket_images(issue, jira)
+  adf = issue.dig('fields', 'description') || {}
+  tempfiles = []
+
+  # Jira-hosted image attachments
+  Array(issue.dig('fields', 'attachment')).each do |att|
+    mime = att['mimeType'].to_s
+    next unless mime.start_with?('image/')
+
+    begin
+      content, content_type = jira.download_attachment(att['content'])
+      next unless content && content.bytesize <= IMAGE_SIZE_LIMIT
+
+      mime_clean = (content_type || mime).split(';').first.strip
+      ext = mime_clean.split('/').last
+      tmp = Tempfile.new(['autoclaude_img', ".#{ext}"])
+      tmp.binmode
+      tmp.write(content)
+      tmp.flush
+      tempfiles << { file: tmp, media_type: mime_clean }
+    rescue => e
+      LOG.warn("Could not download attachment #{att['filename']}: #{e.message}")
+    end
+  end
+
+  # External images embedded in the description ADF
+  adf_extract_external_images(adf).each do |url|
+    begin
+      uri = URI(url)
+      response = Net::HTTP.get_response(uri)
+      if response.is_a?(Net::HTTPRedirection)
+        response = Net::HTTP.get_response(URI(response['location']))
+      end
+      content = response.body
+      content_type = response['content-type'].to_s.split(';').first.strip
+      next unless content_type.start_with?('image/') && content.bytesize <= IMAGE_SIZE_LIMIT
+
+      ext = content_type.split('/').last
+      tmp = Tempfile.new(['autoclaude_img', ".#{ext}"])
+      tmp.binmode
+      tmp.write(content)
+      tmp.flush
+      tempfiles << { file: tmp, media_type: content_type }
+    rescue => e
+      LOG.warn("Could not download external image #{url}: #{e.message}")
+    end
+  end
+
+  tempfiles
 end
 
 def branch_slug(text)
@@ -33,15 +100,67 @@ def extract_pr_description(output)
   match ? match[1].strip : nil
 end
 
-def run_logged(cmd, cwd:, tag:)
-  LOG.info("#{tag}: $ #{cmd.join(' ')}")
+def run_logged(cmd, cwd:, tag:, images: [])
+  LOG.info("#{tag}: $ #{cmd.join(' ')}#{images.empty? ? '' : " [+#{images.length} image(s)]"}")
   output = +''
-  Open3.popen2e(*cmd, chdir: cwd) do |_i, io, thr|
-    io.each_line do |line|
-      output << line
-      LOG.debug("#{tag}| #{line.chomp}")
+
+  if images.empty?
+    Open3.popen2e(*cmd, chdir: cwd) do |_i, io, thr|
+      io.each_line do |line|
+        output << line
+        LOG.debug("#{tag}| #{line.chomp}")
+      end
+      [output, thr.value.success?]
     end
-    [output, thr.value.success?]
+  else
+    # Build a stream-json command by replacing --output-format text with stream-json
+    prompt = cmd.last
+    stream_cmd = cmd[0..-2].dup
+    if (idx = stream_cmd.index('--output-format'))
+      stream_cmd[idx + 1] = 'stream-json'
+    end
+    stream_cmd += ['--verbose', '--input-format', 'stream-json']
+
+    content = [{ type: 'text', text: prompt }]
+    images.each do |img|
+      content << {
+        type: 'image',
+        source: {
+          type: 'base64',
+          media_type: img[:media_type],
+          data: Base64.strict_encode64(File.binread(img[:file].path))
+        }
+      }
+    end
+    json_msg = JSON.generate({ type: 'user', message: { role: 'user', content: content } })
+
+    result_text = nil
+    is_success  = false
+
+    Open3.popen2e(*stream_cmd, chdir: cwd) do |stdin, io, thr|
+      stdin.puts(json_msg)
+      stdin.close
+
+      io.each_line do |line|
+        LOG.debug("#{tag}| #{line.chomp}")
+        begin
+          event = JSON.parse(line)
+          case event['type']
+          when 'assistant'
+            Array(event.dig('message', 'content')).each do |block|
+              output << block['text'] if block['type'] == 'text'
+            end
+          when 'result'
+            result_text = event['result']
+            is_success  = !event['is_error'] && event['subtype'] == 'success'
+          end
+        rescue JSON::ParseError
+          # non-JSON diagnostic lines — ignore
+        end
+      end
+
+      [result_text || output, is_success]
+    end
   end
 end
 
@@ -110,9 +229,10 @@ def build_review_prompt(key, title, branch, pr_url, comments)
 end
 
 def process_ticket(issue, jira, github)
-  key   = issue['key']
-  title = issue['fields']['summary']
-  desc  = adf_to_text(issue.dig('fields', 'description') || {})
+  key    = issue['key']
+  title  = issue['fields']['summary']
+  desc   = adf_to_text(issue.dig('fields', 'description') || {})
+  images = []
 
   if (tid = jira.find_transition_id(key, 'progress'))
     jira.transition(key, tid)
@@ -131,6 +251,9 @@ def process_ticket(issue, jira, github)
     return
   end
 
+  images = download_ticket_images(issue, jira)
+  LOG.info("#{key}: downloaded #{images.length} image(s) from ticket") unless images.empty?
+
   system("git -C #{REPO_PATH} fetch upstream --quiet 2>&1")
 
   unless system("git -C #{REPO_PATH} worktree add #{worktree} -b #{branch} upstream/master 2>&1")
@@ -144,7 +267,8 @@ def process_ticket(issue, jira, github)
      '--permission-mode', 'bypassPermissions',
      '--output-format', 'text', prompt],
     cwd: worktree,
-    tag: key
+    tag: key,
+    images: images
   )
 
   raise "Claude exited non-zero for #{key}" unless claude_ok
@@ -191,6 +315,7 @@ rescue => e
     LOG.error("#{key}: could not reset Jira labels — #{jira_err.message}")
   end
 ensure
+  images.each { |img| img[:file].close! rescue nil }
   if File.exist?(worktree)
     system("git -C #{REPO_PATH} worktree remove #{worktree} --force 2>/dev/null")
     LOG.info("#{key}: worktree cleaned up")

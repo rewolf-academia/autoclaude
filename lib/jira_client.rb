@@ -17,14 +17,33 @@ class JiraClient
 
   def find_new_tickets
     jql = %(labels = "#{TRIGGER_LABEL}" AND labels != "#{IN_PROGRESS_LABEL}" AND labels != "#{IN_REVIEW_LABEL}" AND assignee = currentUser() ORDER BY created ASC)
-    response = get('/rest/api/3/search/jql', jql: jql, fields: 'summary,description,assignee,labels', maxResults: 10)
+    response = get('/rest/api/3/search/jql', jql: jql, fields: 'summary,description,assignee,labels,attachment', maxResults: 10)
     JSON.parse(response.body).fetch('issues', [])
   end
 
   def find_in_review_tickets
     jql = %(labels = "#{IN_REVIEW_LABEL}" AND labels != "#{IN_PROGRESS_LABEL}" AND assignee = currentUser() ORDER BY created ASC)
-    response = get('/rest/api/3/search/jql', jql: jql, fields: 'summary,description,assignee,labels', maxResults: 20)
+    response = get('/rest/api/3/search/jql', jql: jql, fields: 'summary,description,assignee,labels,attachment', maxResults: 20)
     JSON.parse(response.body).fetch('issues', [])
+  end
+
+  def download_attachment(content_url)
+    uri = URI(content_url)
+    3.times do
+      http = Net::HTTP.new(uri.host, uri.port)
+      http.use_ssl = uri.scheme == 'https'
+      http.open_timeout = 15
+      http.read_timeout = 60
+
+      req = Net::HTTP::Get.new(uri)
+      req.basic_auth(@email, @api_token)
+
+      response = http.request(req)
+      return [response.body, response['content-type']] unless response.is_a?(Net::HTTPRedirection)
+
+      uri = URI(response['location'])
+    end
+    raise 'Too many redirects downloading attachment'
   end
 
   def add_label(key, label)
