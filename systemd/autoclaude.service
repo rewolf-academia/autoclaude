@@ -5,7 +5,7 @@ After=network-online.target
 [Service]
 Type=oneshot
 ExecStart=%h/bin/autoclaude
-EnvironmentFile=%h/.autoclaude.env
+EnvironmentFile=%h/.autoclaude/autoclaude.env
 StandardOutput=append:%h/logs/autoclaude.log
 StandardError=append:%h/logs/autoclaude.log
 
@@ -14,4 +14,4 @@ StandardError=append:%h/logs/autoclaude.log
 TimeoutStartSec=60
 
 # Don't kill forked worker processes when the poller exits.
-KillMode=none
+KillMode=process

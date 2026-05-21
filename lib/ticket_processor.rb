@@ -10,6 +10,15 @@ REVIEWER_GITHUB_USER = ENV.fetch('REVIEWER_GITHUB_USER', '')
 REPO_PATH            = ENV.fetch('REPO_PATH', File.expand_path('~/code/academia-app'))
 WORKTREES_PATH       = File.expand_path('~/worktrees')
 CLAUDE_BIN           = ENV.fetch('CLAUDE_BIN', '/home/claude/.local/bin/claude')
+PROJECT_CONTEXT_PATH = ENV.fetch('PROJECT_CONTEXT_PATH', nil)
+
+def project_context
+  return '' if PROJECT_CONTEXT_PATH.empty?
+  File.read(PROJECT_CONTEXT_PATH).strip
+rescue => e
+  LOG.error("Could not read project context file at #{PROJECT_CONTEXT_PATH}: #{e.message}")
+  ''
+end
 
 def adf_to_text(node)
   return '' unless node.is_a?(Hash)
@@ -164,9 +173,11 @@ def run_logged(cmd, cwd:, tag:, images: [])
   end
 end
 
-def build_prompt(key, title, desc, branch, pr_template)
+def build_prompt(key, title, desc, branch, pr_template, project_context: '')
   <<~PROMPT
     You are working on Jira ticket #{key}: #{title}
+
+    #{project_context.empty? ? '' : "**Project context:**\n#{project_context.strip}"}
 
     **Ticket description:**
     #{desc.strip.empty? ? '(No description provided — use your best judgement based on the title.)' : desc.strip}
@@ -198,7 +209,7 @@ def build_prompt(key, title, desc, branch, pr_template)
   PROMPT
 end
 
-def build_review_prompt(key, title, branch, pr_url, comments)
+def build_review_prompt(key, title, branch, pr_url, comments, project_context: nil)
   formatted_comments = comments.map.with_index(1) do |c, i|
     if c['path']
       header = "**Comment #{i} — @#{c.dig('user', 'login')} on `#{c['path']}` line #{c['line'] || c['original_line']}:**"
@@ -210,6 +221,8 @@ def build_review_prompt(key, title, branch, pr_url, comments)
 
   <<~PROMPT
     You are addressing human review comments on a pull request.
+
+    #{project_context.empty? ? '' : "**Project context:**\n#{project_context.strip}"}
 
     **Jira ticket:** [#{key}](#{JIRA_BASE_URL}/browse/#{key}): #{title}
     **PR:** #{pr_url}
@@ -261,7 +274,7 @@ def process_ticket(issue, jira, github)
   end
 
   pr_template = File.read(File.join(REPO_PATH, '.github', 'pull_request_template.md'))
-  prompt = build_prompt(key, title, desc, branch, pr_template)
+  prompt = build_prompt(key, title, desc, branch, pr_template, project_context: project_context)
   output, claude_ok = run_logged(
     [CLAUDE_BIN, '--print', '--no-session-persistence',
      '--permission-mode', 'bypassPermissions',
@@ -343,7 +356,7 @@ def process_review_comments(issue, pr, comments, jira)
     raise "Failed to create review worktree for #{key}"
   end
 
-  prompt = build_review_prompt(key, title, branch, pr_url, comments)
+  prompt = build_review_prompt(key, title, branch, pr_url, comments, project_context: project_context)
   _, claude_ok = run_logged(
     [CLAUDE_BIN, '--print', '--no-session-persistence',
      '--permission-mode', 'bypassPermissions',
